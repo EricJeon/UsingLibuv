@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <string.h>
 #include "../libuv/include/uv.h"
 #include "../libhttp_parser/http_parser.h"
 
@@ -11,6 +12,8 @@
 
 #define DEFAULT_BACKLOG 10   /* indicates the number of connections the kernel might queue */
 
+#define BLOCK_HTTP_PARSE_MESSAGE
+
 typedef struct {
     uv_tcp_t tcpHandle;
     uv_loop_t *pEventLoop;
@@ -18,13 +21,21 @@ typedef struct {
 
 static server_t listenServer;
 
+
+
 typedef struct {
-    uv_tcp_t tcpHandle;
-    server_t *pServerHandle;
-    http_parser stHttpParser;
+    uv_tcp_t tcpHandle;         /* client socket */
+    server_t *pServerHandle;    /* listening socket + event loop */
+    http_parser stHttpParser; 
     uv_write_t  *write_req;
+
+    /* REST related */
+    char * pRESTcmd;
+    enum http_method eHttpMethod;   /* 0 : delete 1: get 3: post 4: put */
 }client_t;
 
+ 
+static struct http_parser_settings s_httpParserSettings;
 
 /* callback function */
 void onConnection_cb( uv_stream_t *pServer_handle , int status);
@@ -32,7 +43,18 @@ void onAlloc_cb(uv_handle_t* handle, size_t suggested_size, uv_buf_t* buf);
 void onRead_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf);
 void onClose_cb(uv_handle_t* handle);
 
-#if 0
+/* http parser callback functions */
+
+/* URL == cmd, so get the command from URL of http header*/
+int onUrl_http_cb(http_parser* pHttpParser, const char *at, size_t length);
+int onBody_http_cb(http_parser* pHttpParser, const char *at, size_t length);
+int onHeaderStatus_http_cb(http_parser* pHttpParser, const char *at, size_t length);
+int onHeaderField_http_cb(http_parser* pHttpParser, const char *at, size_t length);
+int onHeaderValue_http_cb(http_parser* pHttpParser, const char *at, size_t length);
+
+int onHeaders_http_cb(http_parser* pHttpParser);
+int onMessage_http_cb(http_parser* pHttpParser);
+
 #define RESPONSE \
     "http/1.1 200 OK \r\n" \
     "Content-Type: text/plain \r\n" \
@@ -41,33 +63,7 @@ void onClose_cb(uv_handle_t* handle);
     "hello world \n"
 
 
-static uv_tcp_t server;
-static uv_loop_t *loop;
-static uv_buf_t resbuf;
-
-
-
 #if 0
-struct http_parser_settings {
-  http_cb      on_message_begin;
-  http_data_cb on_url;
-  http_data_cb on_status;
-  http_data_cb on_header_field;
-  http_data_cb on_header_value;
-  http_cb      on_headers_complete;
-  http_data_cb on_body;
-  http_cb      on_message_complete;
-  /* When on_chunk_header is called, the current chunk length is stored
-   * in parser->content_length.
-   */
-  http_cb      on_chunk_header;
-  http_cb      on_chunk_complete;
-};
-#endif
-
-static http_parser_settings settings;
-
-
 void after_write(uv_write_t*req, int status)
 {
 
@@ -87,10 +83,97 @@ int  on_headers_complete(http_parser * parser)
 }
 #endif
 
+
+
+int onUrl_http_cb(http_parser* pHttpParser, const char *at, size_t length)
+{
+    client_t *pClient = NULL;
+
+    pClient = (client_t *)pHttpParser->data;
+    
+    pClient->pRESTcmd = malloc(length +1);
+    bzero(pClient->pRESTcmd, length + 1);
+    memcpy(pClient->pRESTcmd, at , length);
+
+//  fprintf(stderr, " URL-RESTcmd : %s , URL length: %zd \n", pClient->pRESTcmd , length);
+    return 0;
+}
+
+int onHeaders_http_cb(http_parser* pHttpParser)
+{
+    client_t *pClient = NULL;
+
+    pClient = (client_t *)pHttpParser->data;
+    pClient->eHttpMethod = pHttpParser->method; 
+
+//  fprintf(stderr, " httpMethod : %s\n", http_method_str(pClient->eHttpMethod));
+    return 0;
+}
+
+int onBody_http_cb(http_parser* pHttpParser, const char *at, size_t length)
+{
+    client_t *pClient = NULL;
+
+    pClient = (client_t *) pHttpParser->data;
+
+    //printf(" httpMethod : %d\n", (pClient->eHttpMethod));
+    /* PARSE JASON */
+    if ( pClient->eHttpMethod == 3) /* POST */
+    {
+        printf("Receive POST so Start to parse  JASON \n");
+        printf(" for example, just dump boyd \n");
+        printf("%s\n", at);
+    }
+    return 0;
+}
+
+
+#ifndef BLOCK_HTTP_PARSE_MESSAGE
+char arString[256];
+
+int onMessage_http_cb(http_parser* pHttpParser)
+{
+#if 1
+    printf(" %s is called\n", __func__ );
+#else
+    bzero(arString, 256);
+    memcpy(arString, at, length);
+    printf("onBody : %s ", arString);
+#endif
+    return 0;
+}
+
+
+int onHeaderStatus_http_cb(http_parser* pHttpParser, const char *at, size_t length)
+{
+    bzero(arString, 256);
+    memcpy(arString, at, length);
+    printf("Status : %s ", arString);
+    return 0;
+}
+
+
+int onHeaderField_http_cb(http_parser* pHttpParser, const char *at, size_t length)
+{
+    bzero(arString, 256);
+    memcpy(arString, at, length);
+    printf("%s : ", arString);
+    return 0;
+}
+
+int onHeaderValue_http_cb(http_parser* pHttpParser, const char *at, size_t length)
+{
+    bzero(arString, 256);
+    memcpy(arString, at, length);
+    printf(" %s\n", arString);
+    return 0;
+}
+#endif
+
+
 void onClose_cb(uv_handle_t* handle)
 {
     printf("close client handle\n"); /* free client_t which is allocated on connection*/
-
     if ( handle != NULL)
     {
         // this routine is called
@@ -119,9 +202,9 @@ void onRead_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf)
 
     if (nread > 0)
     {
-#if 0
+#if 1
         /* parse  http ..*/
-        parsed = http_parser_execute(&client->parser, &settings, buf->base, nread);
+        parsed = http_parser_execute(&pClient->stHttpParser, &s_httpParserSettings, buf->base, nread);
         if (parsed < nread)
         {
             fprintf(stderr, "http parser error\n");
@@ -129,6 +212,7 @@ void onRead_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf)
 #else
         write(1, buf->base, nread);
 #endif
+        fprintf(stderr ,"URL : %s , Method : %s \n", pClient->pRESTcmd,http_method_str(pClient->eHttpMethod));
     }
     else
     {
@@ -141,8 +225,22 @@ void onRead_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf)
             fprintf(stderr, "read: %s\n", uv_strerror(nread));
         }
     }
+    free(buf->base); /* DATA from Client */
 
-    free(buf->base);
+    /* temporary Response */
+//    pClient->write_req = (uv_write_t* )malloc(sizeof(uv_write_t));
+ //   uv_write((uv_write_t*)client->write_req, (uv_stream_t *)&client->handle, &resbuf, 1, after_write);
+
+
+
+    /* in case of POST */
+
+
+
+    /* in case of GET */
+
+
+
     return;
 }
     
@@ -203,12 +301,16 @@ int main()
         return -1;
     }
     /* todo : modulize http parser */
-#if 0
-    settings.on_headers_complete = on_headers_complete;
-    resbuf.base=RESPONSE;
-    resbuf.len=sizeof(RESPONSE);
-#endif
+    s_httpParserSettings.on_url = onUrl_http_cb; /* get url -> command */
+    s_httpParserSettings.on_headers_complete = onHeaders_http_cb; /* get HTTP method */
+    s_httpParserSettings.on_body = onBody_http_cb;
 
+#ifndef BLOCK_HTTP_PARSE_MESSAGE
+    s_httpParserSettings.on_status = onHeaderStatus_http_cb;
+    s_httpParserSettings.on_header_field = onHeaderField_http_cb;
+    s_httpParserSettings.on_header_value = onHeaderValue_http_cb;
+    s_httpParserSettings.on_message_complete = onMessage_http_cb;
+#endif
     returnCode = uv_tcp_init(listenServer.pEventLoop , (uv_tcp_t*)&listenServer.tcpHandle);
     if (returnCode != 0)
     {
