@@ -6,6 +6,9 @@
 #include "../libhttp_parser/http_parser.h"
 #include "../libjason_parser/jsmn.h"
 
+typedef int bool;
+#define true 1
+#define false 0
 
 /* customizing value */
 #define SERVER_IP "0.0.0.0"
@@ -13,53 +16,76 @@
 #define NUM_JASON_FIELD 256
 #define DEFAULT_BACKLOG 10   /* indicates the number of connections the kernel might queue */
 
+#define STR_HTTP_LENGTH "Content-Length"
 #define BLOCK_HTTP_PARSE_MESSAGE
+
+
+#define ROOT_DIR_REST "/tmp/REST"
 
 typedef struct {
     uv_tcp_t tcpHandle;
     uv_loop_t *pEventLoop;
 }server_t;
 
+typedef struct {
+    char * pBuf;
+    size_t bufSize;
+    size_t offset;
+}readBuf_t;
+
 static server_t listenServer;
-
-
 
 typedef struct {
     uv_tcp_t tcpHandle;         /* client socket */
     server_t *pServerHandle;    /* listening socket + event loop */
-
     /* parsers */
     http_parser stHttpParser; 
+    readBuf_t stHttpContent;
+    bool  bHttpLength;
+
     jsmn_parser stJsonParser;
     jsmntok_t *pJsonToken; 
 
     uv_write_t  *write_req;
 
     /* REST related */
-    char * pRESTcmd;
+    char * pRESTcmd;  /* URL is REST command */
     enum http_method eHttpMethod;   /* 0 : delete 1: get 3: post 4: put */
 }client_t;
 
  
 static struct http_parser_settings s_httpParserSettings;
 
-/* callback function */
+/* Libuv callback function */
 void onConnection_cb( uv_stream_t *pServer_handle , int status);
 void onAlloc_cb(uv_handle_t* handle, size_t suggested_size, uv_buf_t* buf);
 void onRead_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf);
 void onClose_cb(uv_handle_t* handle);
 
 /* http parser callback functions */
-
 /* URL == cmd, so get the command from URL of http header*/
 int onUrl_http_cb(http_parser* pHttpParser, const char *at, size_t length);
 int onBody_http_cb(http_parser* pHttpParser, const char *at, size_t length);
-int onHeaderStatus_http_cb(http_parser* pHttpParser, const char *at, size_t length);
+int onHeaders_http_cb(http_parser* pHttpParser);
+
+int onMessage_http_cb(http_parser* pHttpParser);
 int onHeaderField_http_cb(http_parser* pHttpParser, const char *at, size_t length);
 int onHeaderValue_http_cb(http_parser* pHttpParser, const char *at, size_t length);
 
-int onHeaders_http_cb(http_parser* pHttpParser);
-int onMessage_http_cb(http_parser* pHttpParser);
+#ifndef BLOCK_HTTP_PARSE_MESSAGE
+int onHeaderStatus_http_cb(http_parser* pHttpParser, const char *at, size_t length);
+int onChunkHeader_http_cb(http_parser* pHttpParser);
+int onChunkComplete_http_cb(http_parser* pHttpParser);
+#endif
+
+
+
+
+
+
+
+static void util_urlDecoder(char * dst , const char * src );
+static int util_dumpJson(const char *js, jsmntok_t *t, size_t count, int indent);
 
 #define RESPONSE \
     "http/1.1 200 OK \r\n" \
@@ -69,100 +95,12 @@ int onMessage_http_cb(http_parser* pHttpParser);
     "hello world \n"
 
 
-#if 0
-void after_write(uv_write_t*req, int status)
-{
-
-   uv_close((uv_handle_t*) req->handle, on_close);
-   free(req);
-   return; 
-}
-
-int  on_headers_complete(http_parser * parser)
-{
-    client_t*client = parser->data;
-    // send data 
-    printf("httpmesaage!\n");
-    client->write_req = (uv_write_t* )malloc(sizeof(uv_write_t));
-    uv_write((uv_write_t*)client->write_req, (uv_stream_t *)&client->handle, &resbuf, 1, after_write);
-    return 1;
-}
-#endif
-
-
-
-int onUrl_http_cb(http_parser* pHttpParser, const char *at, size_t length)
-{
-    client_t *pClient = NULL;
-
-    pClient = (client_t *)pHttpParser->data;
-    
-    pClient->pRESTcmd = malloc(length +1);
-    bzero(pClient->pRESTcmd, length + 1);
-    memcpy(pClient->pRESTcmd, at , length);
-
-//  fprintf(stderr, " URL-RESTcmd : %s , URL length: %zd \n", pClient->pRESTcmd , length);
-    return 0;
-}
-
-int onHeaders_http_cb(http_parser* pHttpParser)
-{
-    client_t *pClient = NULL;
-
-    pClient = (client_t *)pHttpParser->data;
-    pClient->eHttpMethod = pHttpParser->method; 
-
-//  fprintf(stderr, " httpMethod : %s\n", http_method_str(pClient->eHttpMethod));
-    return 0;
-}
-int SE_Utils_Htoi(char *c_hexa)
-{
-	int deci = 0;
-	const char *sp = c_hexa;
-	while(*sp) {
-		deci *= 16;
-		char ch = 0;
-		if('0' <= *sp && *sp <= '9')
-			ch = *sp - '0';
-		if('A' <= *sp && *sp <= 'F')
-			ch = *sp - 'A' + 10;
-		if('a' <= *sp && *sp <= 'f')
-			ch = *sp - 'a' + 10;
-		deci += ch;
-		sp++;
-	}
-	return deci;
-}
-
-void SE_PH_HTTPAsciiToHexConvert(char *dest, char *src, unsigned int size)
-{   
-	unsigned int src_idx = 0;
-	unsigned int dest_idx = 0;
-	char hex_string[3];
-	for(src_idx = 0; src_idx< size;src_idx++){
-		if(src[src_idx] == 37){ /* find "%" string of JSON format from HTTP stream */
-			src_idx++;
-			memset(hex_string,0x00,5);
-			memcpy(hex_string,&src[src_idx],2);
-			src_idx += 1;
-			dest[dest_idx] = SE_Utils_Htoi((char *)hex_string);
-		}
-		else{
-			dest[dest_idx] = src[src_idx];
-		}
-		dest_idx++;
-	}
-}
-
-
-
-
 /*
  * An example of reading JSON from stdin and printing its content to stdout.
  * The output looks like YAML, but I'm not sure if it's really compatible.
  */
 
-static int dump(const char *js, jsmntok_t *t, size_t count, int indent) {
+static int util_dumpJson(const char *js, jsmntok_t *t, size_t count, int indent) {
 	int i, j, k;
 	if (count == 0) {
                 printf(" count is zero, return\n");
@@ -179,9 +117,9 @@ static int dump(const char *js, jsmntok_t *t, size_t count, int indent) {
 		j = 0;
 		for (i = 0; i < t->size; i++) {
 			for (k = 0; k < indent; k++) printf("  ");
-			j += dump(js, t+1+j, count-j, indent+1);
+			j += util_dumpJson(js, t+1+j, count-j, indent+1);
 			printf(": ");
-			j += dump(js, t+1+j, count-j, indent+1);
+			j += util_dumpJson(js, t+1+j, count-j, indent+1);
 			printf("\n");
 		}
 		return j+1;
@@ -191,19 +129,15 @@ static int dump(const char *js, jsmntok_t *t, size_t count, int indent) {
 		for (i = 0; i < t->size; i++) {
 			for (k = 0; k < indent-1; k++) printf("  ");
 			printf("   - ");
-			j += dump(js, t+1+j, count-j, indent+1);
+			j += util_dumpJson(js, t+1+j, count-j, indent+1);
 			printf("\n");
 		}
 		return j+1;
 	}
 	return 0;
 }
-static const char *JSON_STRING =
-	"{\"cmd\":\"front/output/led\", \"led_no\":\"0\"}";
 
-
-
-void urlDecoder(char * dst , const char * src)
+static void util_urlDecoder(char * dst , const char * src )
 {
     char a,b;
     while (*src)
@@ -242,88 +176,165 @@ void urlDecoder(char * dst , const char * src)
 }
 
 
+#if 0
+void after_write(uv_write_t*req, int status)
+{
+
+   uv_close((uv_handle_t*) req->handle, on_close);
+   free(req);
+   return; 
+}
+
+int  on_headers_complete(http_parser * parser)
+{
+    client_t*client = parser->data;
+    // send data 
+    printf("httpmesaage!\n");
+    client->write_req = (uv_write_t* )malloc(sizeof(uv_write_t));
+    uv_write((uv_write_t*)client->write_req, (uv_stream_t *)&client->handle, &resbuf, 1, after_write);
+    return 1;
+}
+#endif
+
+
+int onUrl_http_cb(http_parser* pHttpParser, const char *at, size_t length)
+{
+    client_t *pClient = NULL;
+    pClient = (client_t *)pHttpParser->data;
+    
+    pClient->pRESTcmd = malloc(length +1);
+    bzero(pClient->pRESTcmd, length + 1);
+    memcpy(pClient->pRESTcmd, at , length);
+
+//  fprintf(stderr, " URL-RESTcmd : %s , URL length: %zd \n", pClient->pRESTcmd , length);
+    return 0;
+}
+
+int onHeaders_http_cb(http_parser* pHttpParser)
+{
+    client_t *pClient = NULL;
+    pClient = (client_t *)pHttpParser->data;
+    pClient->eHttpMethod = pHttpParser->method; 
+//    fprintf(stderr, " httpMethod : %s\n", http_method_str(pClient->eHttpMethod));
+//
+    /* header has contents length, so I can allocate memory for http body */
+    pClient->stHttpContent.pBuf = malloc(pClient->stHttpContent.bufSize + 1);
+    bzero(pClient->stHttpContent.pBuf, pClient->stHttpContent.bufSize + 1);
+    pClient->stHttpContent.offset = 0;
+    return 0;
+}
+
 int onBody_http_cb(http_parser* pHttpParser, const char *at, size_t length)
+{
+    client_t *pClient = NULL;
+    pClient = (client_t *) pHttpParser->data;
+    if (length + pClient->stHttpContent.offset > pClient->stHttpContent.bufSize)
+    {
+        fprintf(stderr, " there is some issue to calcualte http body");
+        fprintf(stderr, "length : %zd \n", length);
+        fprintf(stderr, "pClient->stHttpContent.offset : %zd \n", pClient->stHttpContent.offset);
+        fprintf(stderr, "pClient->stHttpContent.bufSize : %zd \n", pClient->stHttpContent.bufSize);
+        return -1;
+    }
+
+    memcpy( pClient->stHttpContent.pBuf + pClient->stHttpContent.offset, at, length);
+    pClient->stHttpContent.offset += length;
+    return 0;
+}
+
+
+int onHeaderField_http_cb(http_parser* pHttpParser, const char *at, size_t length)
+{
+    client_t *pClient = NULL;
+    pClient = (client_t *) pHttpParser->data;
+    if ( strncmp(at, STR_HTTP_LENGTH, length) == 0 )
+    {
+//        printf(" http length filed :");
+        pClient->bHttpLength = true;        
+    }
+    return 0;
+}
+
+int onHeaderValue_http_cb(http_parser* pHttpParser, const char *at, size_t length)
+{
+    client_t *pClient = NULL;
+    pClient = (client_t *) pHttpParser->data;
+    if ( pClient->bHttpLength == true ) 
+    {
+        pClient->stHttpContent.bufSize = atoi(at);
+ //       printf(" length is  %zd \n", pClient->stHttpContent.bufSize);
+        pClient->bHttpLength = false;        
+    }
+    return 0;
+}
+
+
+int onMessage_http_cb(http_parser* pHttpParser)
 {
     client_t *pClient = NULL;
     int returnCode = 0;
     pClient = (client_t *) pHttpParser->data;
-    char * data = NULL;
-    //printf(" httpMethod : %d\n", (pClient->eHttpMethod));
-    /* PARSE JASON */
+    char * pConvertedJson = NULL;
+    char * pHttpContent = NULL;
+    size_t HttpContentSize = 0;
+    pHttpContent = pClient->stHttpContent.pBuf;
+    HttpContentSize = pClient->stHttpContent.bufSize;
+
+    //    fprintf(stderr ,"URL : %s , Method : %s \n", pClient->pRESTcmd,http_method_str(pClient->eHttpMethod));
     if ( pClient->eHttpMethod == 3) /* POST */
     {
+        if(strncmp("command=", pHttpContent, 8) == 0)
+        {
+            /* PARSE JASON */
+            jsmn_init(&pClient->stJsonParser);
+            pClient->pJsonToken = malloc(sizeof(jsmntok_t) * NUM_JASON_FIELD);
 
-        printf("Receive POST so Start to parse  JASON \n");
-#if 1
-        printf("dump body \n");
-        printf("%s\n", at);
-#endif
-        jsmn_init(&pClient->stJsonParser);
-        pClient->pJsonToken = malloc(sizeof(jsmntok_t) * NUM_JASON_FIELD);
-#if 0
-        at = at + 8;
-        length = length - 8;
-
-        printf(" Length from server %zd - 8 \n", length);
-        data = malloc( length+1 );
-        bzero (data, length+1  );
-        memcpy(data, at , length );
-        
-        SE_PH_HTTPAsciiToHexConvert(data, at, length);
-        printf("converted string : %s \n", data); 
-        printf (" sizeof %zd strlen %zd \n", length, strlen(data));
-#endif
-        at = at + 8;
-        data = malloc(length);
-        bzero (data, length);
+          /* DATA from client has unnecessary string - "command=" - so need to skip 8 chars. */
+            pHttpContent = pHttpContent + 8; 
+            pConvertedJson = malloc(HttpContentSize);
+            bzero (pConvertedJson, HttpContentSize);
  
         /* need to %xx to ASCII */
-        urlDecoder(data , at );
-        printf("converted string : %s \n", data);
-
-        returnCode = jsmn_parse(&pClient->stJsonParser, data, length, pClient->pJsonToken, NUM_JASON_FIELD);      
-#if 0 
-        returnCode = jsmn_parse(&pClient->stJsonParser, at, length, pClient->pJsonToken, NUM_JASON_FIELD);      
-        printf (" sizeof %ld strlen %zd \n", sizeof(JSON_STRING), strlen(JSON_STRING));
-        returnCode = jsmn_parse(&pClient->stJsonParser, JSON_STRING, strlen(JSON_STRING), pClient->pJsonToken, NUM_JASON_FIELD);      
+            util_urlDecoder(pConvertedJson , pHttpContent );
+            pConvertedJson = realloc(pConvertedJson, strlen(pConvertedJson) +1 );
+#if 0
+            printf("original: %zd converted  : %zd\n", HttpContentSize, strlen(pConvertedJson)); 
+            printf("recevied Json: %s \n", pHttpContent);
+            printf("converted Json : %s \n", pConvertedJson);
 #endif
-        if (returnCode  < 0) 
-        {
-            if (returnCode  == JSMN_ERROR_NOMEM) 
+            returnCode = jsmn_parse(&pClient->stJsonParser, pConvertedJson, strlen(pConvertedJson), pClient->pJsonToken, NUM_JASON_FIELD);      
+            if (returnCode  < 0) 
             {
-                fprintf(stderr, " Need more jason token");
-            } 
+                if (returnCode  == JSMN_ERROR_NOMEM) {
+                    fprintf(stderr, " Need more jason token\n");
+                } 
+                else
+                {
+                    fprintf(stderr, " Json parsing error : %d \n", returnCode);
+                }
+            }
             else
             {
-                fprintf(stderr, " Json parsing error : %d ", returnCode);
+                //printf(" parsed Json, total entity: %d \n", pClient->stJsonParser.toknext);
+                util_dumpJson(pConvertedJson, pClient->pJsonToken, pClient->stJsonParser.toknext, 0); 
             }
+
+            if ( pConvertedJson != NULL)
+                free(pConvertedJson);
         }
         else
         {
-            printf(" dump Jason - count : %d \n", pClient->stJsonParser.toknext);
-            //dump(js, tok, p.toknext, 0);
-            dump(data, pClient->pJsonToken, pClient->stJsonParser.toknext, 0); 
+            fprintf(stderr, "MES data size : %zd \n", HttpContentSize);
+            write(1, pHttpContent , HttpContentSize);
         }
     }
+    uv_close((uv_handle_t*)&pClient->tcpHandle, onClose_cb);
     return 0;
 }
 
 
 #ifndef BLOCK_HTTP_PARSE_MESSAGE
 char arString[256];
-
-int onMessage_http_cb(http_parser* pHttpParser)
-{
-#if 1
-    printf(" %s is called\n", __func__ );
-#else
-    bzero(arString, 256);
-    memcpy(arString, at, length);
-    printf("onBody : %s ", arString);
-#endif
-    return 0;
-}
-
 
 int onHeaderStatus_http_cb(http_parser* pHttpParser, const char *at, size_t length)
 {
@@ -333,37 +344,36 @@ int onHeaderStatus_http_cb(http_parser* pHttpParser, const char *at, size_t leng
     return 0;
 }
 
-
-int onHeaderField_http_cb(http_parser* pHttpParser, const char *at, size_t length)
+int onChunkHeader_http_cb(http_parser* pHttpParser)
 {
-    bzero(arString, 256);
-    memcpy(arString, at, length);
-    printf("%s : ", arString);
-    return 0;
+    printf("%s is called\n",__func__);
 }
-
-int onHeaderValue_http_cb(http_parser* pHttpParser, const char *at, size_t length)
+int onChunkComplete_http_cb(http_parser* pHttpParser)
 {
-    bzero(arString, 256);
-    memcpy(arString, at, length);
-    printf(" %s\n", arString);
-    return 0;
+    printf("%s is called\n", __func__);
 }
 #endif
 
 
 void onClose_cb(uv_handle_t* handle)
 {
+    client_t *pClient = (client_t *) handle;
     printf("close client handle\n"); /* free client_t which is allocated on connection*/
-    if ( handle != NULL)
+
+    if (pClient->stHttpContent.pBuf != NULL)
+        free(pClient->stHttpContent.pBuf);
+
+    if (pClient->pRESTcmd != NULL )
+        free(pClient->pRESTcmd);
+
+    if ( pClient != NULL)
     {
         // this routine is called
         //fprintf(stderr, "client hand is not null, so free it\n");
-        free(handle);
+        free(pClient);
     }
     return;
 }
-
 
 
 /* routine - do not need to change this alloc_cb in normal cases */
@@ -372,6 +382,7 @@ void onAlloc_cb(uv_handle_t* handle, size_t suggested_size, uv_buf_t* buf)
     // normally suggested_size = 65536
     //printf("Read - suggest size : %zu \n", suggested_size);
     buf->base = malloc(suggested_size);
+    bzero(buf->base, suggested_size);
     buf->len = suggested_size;
     return;
 }
@@ -380,7 +391,7 @@ void onRead_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf)
 {
     size_t parsed;
     client_t *pClient = (client_t*)stream;
-
+//    printf("onRead : %zd \n", nread);
     if (nread > 0)
     {
 #if 1
@@ -391,9 +402,8 @@ void onRead_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf)
             fprintf(stderr, "http parser error\n");
         }
 #else
-        write(1, buf->base, nread);
+    //    write(1, buf->base, nread);
 #endif
-        fprintf(stderr ,"URL : %s , Method : %s \n", pClient->pRESTcmd,http_method_str(pClient->eHttpMethod));
     }
     else
     {
@@ -406,8 +416,8 @@ void onRead_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf)
             fprintf(stderr, "read: %s\n", uv_strerror(nread));
         }
     }
-    free(buf->base); /* DATA from Client */
-
+    if (buf->base != NULL)
+        free(buf->base); /* DATA from Client */
     /* temporary Response */
 //    pClient->write_req = (uv_write_t* )malloc(sizeof(uv_write_t));
  //   uv_write((uv_write_t*)client->write_req, (uv_stream_t *)&client->handle, &resbuf, 1, after_write);
@@ -420,8 +430,7 @@ void onRead_cb(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf)
 
     /* in case of GET */
 
-
-
+ //   uv_close((uv_handle_t*)&pClient->tcpHandle, onClose_cb);
     return;
 }
     
@@ -433,6 +442,7 @@ void onConnection_cb( uv_stream_t *pServer_handle , int status)
     assert((uv_tcp_t *)pServer_handle == &listenServer.tcpHandle);
 
     pClient = malloc(sizeof(client_t));
+    bzero(pClient, sizeof(client_t));
     pClient->pServerHandle = (server_t *)pServer_handle;
     returnCode = uv_tcp_init((uv_loop_t * )pClient->pServerHandle->pEventLoop, (uv_tcp_t*)&pClient->tcpHandle );
     if (returnCode != 0)
@@ -440,7 +450,7 @@ void onConnection_cb( uv_stream_t *pServer_handle , int status)
         fprintf(stderr,"fail to init client tcp socket \n");
         return;
     }
-    /* todo initialize HTTP parser */
+    /* initialize HTTP parser */
     http_parser_init(&pClient->stHttpParser, HTTP_REQUEST);
     pClient->stHttpParser.data = pClient;
     /* todo initialize JSON request */
@@ -485,12 +495,14 @@ int main()
     s_httpParserSettings.on_url = onUrl_http_cb; /* get url -> command */
     s_httpParserSettings.on_headers_complete = onHeaders_http_cb; /* get HTTP method */
     s_httpParserSettings.on_body = onBody_http_cb;
+    s_httpParserSettings.on_message_complete = onMessage_http_cb;
+    s_httpParserSettings.on_header_field = onHeaderField_http_cb;
+    s_httpParserSettings.on_header_value = onHeaderValue_http_cb;
 
 #ifndef BLOCK_HTTP_PARSE_MESSAGE
     s_httpParserSettings.on_status = onHeaderStatus_http_cb;
-    s_httpParserSettings.on_header_field = onHeaderField_http_cb;
-    s_httpParserSettings.on_header_value = onHeaderValue_http_cb;
-    s_httpParserSettings.on_message_complete = onMessage_http_cb;
+    s_httpParserSettings.on_chunk_header = onChunkHeader_http_cb;
+    s_httpParserSettings.on_chunk_complete = onChunkComplete_http_cb;
 #endif
     returnCode = uv_tcp_init(listenServer.pEventLoop , (uv_tcp_t*)&listenServer.tcpHandle);
     if (returnCode != 0)
